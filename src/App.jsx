@@ -1,21 +1,25 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import { motion, useMotionValue, useTransform, animate } from "framer-motion";
+import { motion, useMotionValue, animate } from "framer-motion";
 import { Agentation } from "agentation";
 
-// ─── Constants ───
-const MIN_LEVERAGE = 2;
-const MAX_LEVERAGE = 10;
-const STEPS = MAX_LEVERAGE - MIN_LEVERAGE; // 8 steps
-const TICK_COUNT = STEPS + 1; // 9 ticks (2x through 10x)
+// ─── Default Constants ───
+const DEFAULT_MIN = 2;
+const DEFAULT_MAX = 10;
 
 // Decorative bar heights (normalized 0–1) — increasing toward higher leverage
-// Minimum height ensures all bars are visible, progressive growth toward 10x
-const BAR_HEIGHTS = {
-  2: 0.12, 3: 0.15, 4: 0.18, 5: 0.22,
-  6: 0.30, 7: 0.42, 8: 0.58, 9: 0.78, 10: 1.0,
-};
+function generateBarHeights(min, max) {
+  const heights = {};
+  const steps = max - min;
+  for (let i = 0; i <= steps; i++) {
+    const val = min + i;
+    // Progressive growth from 0.12 to 1.0
+    const t = i / steps;
+    heights[val] = 0.12 + t * 0.88;
+  }
+  return heights;
+}
 
-// Max height for the tallest bar (10x) in pixels
+// Max height for the tallest bar in pixels
 const MAX_BAR_HEIGHT = 90;
 
 // Height of the small baseline ticks at the bottom
@@ -24,10 +28,10 @@ const BASELINE_TICK_HEIGHT = 5;
 // Gap between bottom row and top row
 const ROW_GAP = 3;
 
-// Decorative spacer lines between each integer pair (2–3 lines between each)
+// Decorative spacer lines between each integer pair
 const SPACER_LINES_PER_SEGMENT = 3;
 
-// Spring animation config — fast, no bounce (per PRD)
+// Spring animation config — fast, no bounce
 const SPRING_CONFIG = {
   type: "spring",
   stiffness: 800,
@@ -45,15 +49,63 @@ function lerp(a, b, t) {
 }
 
 // ─── Slider Component ───
-function LeverageSlider() {
-  const [leverage, setLeverage] = useState(6);
+function LeverageSlider({
+  // Controlled value (optional - if provided, component is controlled)
+  value,
+  // Default value for uncontrolled mode
+  defaultValue,
+  // Callback when value changes
+  onChange,
+  // Callback when drag starts
+  onDragStart,
+  // Callback when drag ends
+  onDragEnd,
+  // Min leverage value
+  min = DEFAULT_MIN,
+  // Max leverage value
+  max = DEFAULT_MAX,
+  // Custom label (set to null to hide)
+  label = "Leverage",
+  // Whether the slider is disabled
+  disabled = false,
+  // Custom class name for the container
+  className,
+  // Custom styles for the container
+  style,
+}) {
+  const steps = max - min;
+  const tickCount = steps + 1;
+  const barHeights = generateBarHeights(min, max);
+
+  // Determine initial value
+  const getInitialValue = () => {
+    if (value !== undefined) return clamp(value, min, max);
+    if (defaultValue !== undefined) return clamp(defaultValue, min, max);
+    return Math.round((min + max) / 2); // Default to middle
+  };
+
+  // Internal state for uncontrolled mode
+  const [internalValue, setInternalValue] = useState(getInitialValue);
+
+  // The actual current value (controlled or uncontrolled)
+  const currentValue = value !== undefined ? clamp(value, min, max) : internalValue;
+
   const [isDragging, setIsDragging] = useState(false);
   const [isHovering, setIsHovering] = useState(false);
-  const [displayValue, setDisplayValue] = useState(6);
+  const [displayValue, setDisplayValue] = useState(currentValue);
   const trackRef = useRef(null);
 
   // Motion value for smooth thumb position
   const thumbX = useMotionValue(0);
+
+  // Sync displayValue with controlled value changes
+  useEffect(() => {
+    if (value !== undefined && !isDragging) {
+      const clampedValue = clamp(value, min, max);
+      setDisplayValue(clampedValue);
+      thumbX.set(leverageToX(clampedValue));
+    }
+  }, [value, min, max, isDragging]);
 
   // Get track geometry
   const getTrackBounds = useCallback(() => {
@@ -65,36 +117,46 @@ function LeverageSlider() {
   // Convert leverage value to pixel X within track
   const leverageToX = useCallback((val) => {
     const { width } = getTrackBounds();
-    return ((val - MIN_LEVERAGE) / STEPS) * width;
-  }, [getTrackBounds]);
+    return ((val - min) / steps) * width;
+  }, [getTrackBounds, min, steps]);
 
   // Convert pixel X to leverage value (continuous)
   const xToLeverage = useCallback((px) => {
     const { width } = getTrackBounds();
     const ratio = px / width;
-    return MIN_LEVERAGE + ratio * STEPS;
-  }, [getTrackBounds]);
+    return min + ratio * steps;
+  }, [getTrackBounds, min, steps]);
 
   // Snap to nearest integer
   const snapToNearest = useCallback((continuousVal) => {
-    return clamp(Math.round(continuousVal), MIN_LEVERAGE, MAX_LEVERAGE);
-  }, []);
+    return clamp(Math.round(continuousVal), min, max);
+  }, [min, max]);
+
+  // Update value (handles both controlled and uncontrolled)
+  const updateValue = useCallback((newValue) => {
+    if (value === undefined) {
+      // Uncontrolled mode - update internal state
+      setInternalValue(newValue);
+    }
+    // Always call onChange if provided
+    onChange?.(newValue);
+  }, [value, onChange]);
 
   // Initialize thumb position
   useEffect(() => {
-    thumbX.set(leverageToX(leverage));
+    thumbX.set(leverageToX(currentValue));
   }, []);
 
   // Handle resize
   useEffect(() => {
     const handleResize = () => {
       if (!isDragging) {
-        thumbX.set(leverageToX(leverage));
+        thumbX.set(leverageToX(currentValue));
       }
     };
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
-  }, [isDragging, leverage, leverageToX, thumbX]);
+  }, [isDragging, currentValue, leverageToX, thumbX]);
 
   // Animate thumb to a position with spring physics
   const animateThumbTo = useCallback((targetX, onComplete) => {
@@ -106,11 +168,13 @@ function LeverageSlider() {
 
   // ─── Pointer Handlers ───
   const handlePointerDown = useCallback((e) => {
+    if (disabled) return;
     e.preventDefault();
     const { left, width } = getTrackBounds();
     const relativeX = clamp(e.clientX - left, 0, width);
 
     setIsDragging(true);
+    onDragStart?.();
     thumbX.set(relativeX);
 
     const continuous = xToLeverage(relativeX);
@@ -118,10 +182,10 @@ function LeverageSlider() {
 
     // Capture pointer
     e.target.setPointerCapture?.(e.pointerId);
-  }, [getTrackBounds, xToLeverage, snapToNearest, thumbX]);
+  }, [disabled, getTrackBounds, xToLeverage, snapToNearest, thumbX, onDragStart]);
 
   const handlePointerMove = useCallback((e) => {
-    if (!isDragging) return;
+    if (!isDragging || disabled) return;
 
     const { left, width } = getTrackBounds();
     const relativeX = clamp(e.clientX - left, 0, width);
@@ -131,7 +195,7 @@ function LeverageSlider() {
     const continuous = xToLeverage(relativeX);
     const snapped = snapToNearest(continuous);
     setDisplayValue(snapped);
-  }, [isDragging, getTrackBounds, xToLeverage, snapToNearest, thumbX]);
+  }, [isDragging, disabled, getTrackBounds, xToLeverage, snapToNearest, thumbX]);
 
   const handlePointerUp = useCallback(() => {
     if (!isDragging) return;
@@ -143,11 +207,12 @@ function LeverageSlider() {
 
     // Animate snap with spring physics
     animateThumbTo(targetX, () => {
-      setLeverage(snapped);
+      updateValue(snapped);
       setDisplayValue(snapped);
       setIsDragging(false);
+      onDragEnd?.(snapped);
     });
-  }, [isDragging, thumbX, xToLeverage, snapToNearest, leverageToX, animateThumbTo]);
+  }, [isDragging, thumbX, xToLeverage, snapToNearest, leverageToX, animateThumbTo, updateValue, onDragEnd]);
 
   // Global pointer up listener for safety
   useEffect(() => {
@@ -160,24 +225,26 @@ function LeverageSlider() {
 
   // Handle tap on axis label
   const handleLabelTap = useCallback((val) => {
+    if (disabled) return;
     const targetX = leverageToX(val);
     setDisplayValue(val);
     animateThumbTo(targetX, () => {
-      setLeverage(val);
+      updateValue(val);
     });
-  }, [leverageToX, animateThumbTo]);
+  }, [disabled, leverageToX, animateThumbTo, updateValue]);
 
   // Handle keyboard
   const handleKeyDown = useCallback((e) => {
-    let newVal = leverage;
+    if (disabled) return;
+    let newVal = currentValue;
     if (e.key === "ArrowRight" || e.key === "ArrowUp") {
-      newVal = Math.min(leverage + 1, MAX_LEVERAGE);
+      newVal = Math.min(currentValue + 1, max);
     } else if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
-      newVal = Math.max(leverage - 1, MIN_LEVERAGE);
+      newVal = Math.max(currentValue - 1, min);
     } else if (e.key === "Home") {
-      newVal = MIN_LEVERAGE;
+      newVal = min;
     } else if (e.key === "End") {
-      newVal = MAX_LEVERAGE;
+      newVal = max;
     } else {
       return;
     }
@@ -185,33 +252,39 @@ function LeverageSlider() {
     setDisplayValue(newVal);
     const targetX = leverageToX(newVal);
     animateThumbTo(targetX, () => {
-      setLeverage(newVal);
+      updateValue(newVal);
     });
-  }, [leverage, leverageToX, animateThumbTo]);
+  }, [disabled, currentValue, min, max, leverageToX, animateThumbTo, updateValue]);
 
   const showHandle = isDragging || isHovering;
 
   return (
     <div
+      className={className}
       style={{
         fontFamily: "'Barlow', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif",
         userSelect: "none",
         WebkitUserSelect: "none",
         width: "100%",
         maxWidth: 480,
+        opacity: disabled ? 0.5 : 1,
+        pointerEvents: disabled ? "none" : "auto",
+        ...style,
       }}
     >
       {/* Label */}
-      <div style={{
-        fontSize: 14,
-        fontWeight: 500,
-        color: "#71717a",
-        marginBottom: 12,
-        letterSpacing: "0.01em",
-        fontFamily: "'Barlow', sans-serif",
-      }}>
-        Leverage
-      </div>
+      {label !== null && (
+        <div style={{
+          fontSize: 14,
+          fontWeight: 500,
+          color: "#71717a",
+          marginBottom: 12,
+          letterSpacing: "0.01em",
+          fontFamily: "'Barlow', sans-serif",
+        }}>
+          {label}
+        </div>
+      )}
 
       {/* Value Display */}
       <div style={{
@@ -258,9 +331,9 @@ function LeverageSlider() {
         style={{
           position: "relative",
           height: 120,
-          cursor: isDragging ? "grabbing" : "pointer",
+          cursor: disabled ? "not-allowed" : isDragging ? "grabbing" : "pointer",
         }}
-        onMouseEnter={() => setIsHovering(true)}
+        onMouseEnter={() => !disabled && setIsHovering(true)}
         onMouseLeave={() => !isDragging && setIsHovering(false)}
       >
         {/* Interaction Layer — full area is draggable */}
@@ -278,22 +351,23 @@ function LeverageSlider() {
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
           role="slider"
-          aria-label="Leverage multiplier"
-          aria-valuemin={MIN_LEVERAGE}
-          aria-valuemax={MAX_LEVERAGE}
+          aria-label={label || "Leverage multiplier"}
+          aria-valuemin={min}
+          aria-valuemax={max}
           aria-valuenow={displayValue}
           aria-valuetext={`${displayValue}x leverage`}
-          tabIndex={0}
+          aria-disabled={disabled}
+          tabIndex={disabled ? -1 : 0}
           onKeyDown={handleKeyDown}
         >
           {/* ============ TOP ROW: Growing lines ============ */}
 
           {/* Bars at integer positions — violet if selected, grey if not */}
-          {Array.from({ length: TICK_COUNT }, (_, i) => {
-            const val = MIN_LEVERAGE + i;
-            const heightFraction = BAR_HEIGHTS[val];
+          {Array.from({ length: tickCount }, (_, i) => {
+            const val = min + i;
+            const heightFraction = barHeights[val];
             const barH = heightFraction * MAX_BAR_HEIGHT;
-            const xPercent = (i / STEPS) * 100;
+            const xPercent = (i / steps) * 100;
             const isSelected = val <= displayValue;
 
             return (
@@ -318,14 +392,14 @@ function LeverageSlider() {
           })}
 
           {/* Spacer lines between integers — violet if selected, grey if not */}
-          {Array.from({ length: STEPS }, (_, segIndex) => {
-            const startVal = MIN_LEVERAGE + segIndex;
-            const baseHeight = BAR_HEIGHTS[startVal];
-            const nextHeight = BAR_HEIGHTS[startVal + 1];
+          {Array.from({ length: steps }, (_, segIndex) => {
+            const startVal = min + segIndex;
+            const baseHeight = barHeights[startVal];
+            const nextHeight = barHeights[startVal + 1];
 
             return Array.from({ length: SPACER_LINES_PER_SEGMENT }, (_, lineIndex) => {
               const t = (lineIndex + 1) / (SPACER_LINES_PER_SEGMENT + 1);
-              const xPercent = ((segIndex + t) / STEPS) * 100;
+              const xPercent = ((segIndex + t) / steps) * 100;
               const heightFraction = lerp(baseHeight, nextHeight, t);
               const lineH = heightFraction * MAX_BAR_HEIGHT * 0.5;
               const positionValue = startVal + t;
@@ -357,9 +431,9 @@ function LeverageSlider() {
           {/* ============ BOTTOM ROW: Uniform short ticks ============ */}
 
           {/* Baseline ticks at integer positions */}
-          {Array.from({ length: TICK_COUNT }, (_, i) => {
-            const val = MIN_LEVERAGE + i;
-            const xPercent = (i / STEPS) * 100;
+          {Array.from({ length: tickCount }, (_, i) => {
+            const val = min + i;
+            const xPercent = (i / steps) * 100;
             const isSelected = val <= displayValue;
 
             return (
@@ -385,11 +459,11 @@ function LeverageSlider() {
           })}
 
           {/* Baseline ticks at spacer positions */}
-          {Array.from({ length: STEPS }, (_, segIndex) => {
-            const startVal = MIN_LEVERAGE + segIndex;
+          {Array.from({ length: steps }, (_, segIndex) => {
+            const startVal = min + segIndex;
             return Array.from({ length: SPACER_LINES_PER_SEGMENT }, (_, lineIndex) => {
               const t = (lineIndex + 1) / (SPACER_LINES_PER_SEGMENT + 1);
-              const xPercent = ((segIndex + t) / STEPS) * 100;
+              const xPercent = ((segIndex + t) / steps) * 100;
               const positionValue = startVal + t;
               const isSelected = positionValue <= displayValue;
 
@@ -429,7 +503,7 @@ function LeverageSlider() {
               pointerEvents: "none",
             }}
             animate={{
-              height: showHandle ? 110 : (BAR_HEIGHTS[displayValue] || 0.25) * MAX_BAR_HEIGHT * 0.9,
+              height: showHandle ? 110 : (barHeights[displayValue] || 0.25) * MAX_BAR_HEIGHT * 0.9,
             }}
             transition={{ duration: 0.2 }}
           />
@@ -497,10 +571,10 @@ function LeverageSlider() {
           height: 20,
           pointerEvents: "auto",
         }}>
-          {Array.from({ length: TICK_COUNT }, (_, i) => {
-            const val = MIN_LEVERAGE + i;
+          {Array.from({ length: tickCount }, (_, i) => {
+            const val = min + i;
             const isActive = val === displayValue;
-            const xPercent = (i / STEPS) * 100;
+            const xPercent = (i / steps) * 100;
 
             return (
               <motion.button
@@ -518,7 +592,7 @@ function LeverageSlider() {
                   background: "none",
                   border: "none",
                   padding: "4px 6px",
-                  cursor: "pointer",
+                  cursor: disabled ? "not-allowed" : "pointer",
                   fontSize: 12,
                   fontFamily: "inherit",
                   lineHeight: 1,
@@ -526,6 +600,7 @@ function LeverageSlider() {
                   whiteSpace: "nowrap",
                 }}
                 aria-label={`Set leverage to ${val}x`}
+                disabled={disabled}
               >
                 {val}x
               </motion.button>
@@ -537,9 +612,15 @@ function LeverageSlider() {
   );
 }
 
-// ─── Page Wrapper ───
+// Export the component for use in other projects
+export { LeverageSlider };
+
+// ─── Demo Page Wrapper ───
 export default function App() {
   const isDev = import.meta.env.DEV;
+
+  // Demo: controlled component example
+  const [leverage, setLeverage] = useState(6);
 
   return (
     <>
@@ -559,7 +640,10 @@ export default function App() {
           width: "100%",
           maxWidth: 480,
         }}>
-          <LeverageSlider />
+          <LeverageSlider
+            value={leverage}
+            onChange={setLeverage}
+          />
         </div>
       </div>
       {isDev && <Agentation />}
